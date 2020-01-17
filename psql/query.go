@@ -14,7 +14,6 @@ import (
 )
 
 const (
-	empty      = ""
 	closeBlock = 500
 )
 
@@ -38,13 +37,17 @@ func (c *Compiler) AddRelationship(child, parent string, rel *DBRel) error {
 	return c.schema.SetRel(child, parent, rel)
 }
 
-func (c *Compiler) IDColumn(table string) (string, error) {
-	t, err := c.schema.GetTable(table)
+func (c *Compiler) IDColumn(table string) (*DBColumn, error) {
+	ti, err := c.schema.GetTable(table)
 	if err != nil {
-		return empty, err
+		return nil, err
 	}
 
-	return t.PrimaryCol, nil
+	if ti.PrimaryCol == nil {
+		return nil, fmt.Errorf("no primary key column found")
+	}
+
+	return ti.PrimaryCol, nil
 }
 
 type compilerContext struct {
@@ -78,7 +81,7 @@ func (co *Compiler) compileQuery(qc *qcode.QCode, w io.Writer) (uint32, error) {
 	c := &compilerContext{w, qc.Selects, co}
 	multiRoot := (len(qc.Roots) > 1)
 
-	st := NewStack()
+	st := NewIntStack()
 
 	if multiRoot {
 		io.WriteString(c.w, `SELECT row_to_json("json_root") FROM (SELECT `)
@@ -224,20 +227,23 @@ func (c *compilerContext) processChildren(sel *qcode.Select, ti *DBTableInfo) (u
 		}
 
 		switch rel.Type {
-		case RelOneToMany:
-			fallthrough
-		case RelBelongTo:
-			if _, ok := colmap[rel.Col2]; !ok {
-				cols = append(cols, &qcode.Column{Table: ti.Name, Name: rel.Col2, FieldName: rel.Col2})
+		case RelOneToOne, RelOneToMany:
+			if _, ok := colmap[rel.Right.Col]; !ok {
+				cols = append(cols, &qcode.Column{Table: ti.Name, Name: rel.Right.Col, FieldName: rel.Right.Col})
 			}
+			colmap[rel.Right.Col] = struct{}{}
+
 		case RelOneToManyThrough:
-			if _, ok := colmap[rel.Col1]; !ok {
-				cols = append(cols, &qcode.Column{Table: ti.Name, Name: rel.Col1, FieldName: rel.Col1})
+			if _, ok := colmap[rel.Left.Col]; !ok {
+				cols = append(cols, &qcode.Column{Table: ti.Name, Name: rel.Left.Col, FieldName: rel.Left.Col})
 			}
+			colmap[rel.Left.Col] = struct{}{}
+
 		case RelRemote:
-			if _, ok := colmap[rel.Col1]; !ok {
-				cols = append(cols, &qcode.Column{Table: ti.Name, Name: rel.Col1, FieldName: rel.Col2})
+			if _, ok := colmap[rel.Left.Col]; !ok {
+				cols = append(cols, &qcode.Column{Table: ti.Name, Name: rel.Left.Col, FieldName: rel.Right.Col})
 			}
+			colmap[rel.Left.Col] = struct{}{}
 			skipped |= (1 << uint(id))
 
 		default:
@@ -400,17 +406,13 @@ func (c *compilerContext) renderJoinByName(table, parent string, id int32) error
 	}
 
 	//fmt.Fprintf(w, ` LEFT OUTER JOIN "%s" ON (("%s"."%s") = ("%s_%d"."%s"))`,
-	//rel.Through, rel.Through, rel.ColT, c.parent.Name, c.parent.ID, rel.Col1)
+	//rel.Through, rel.Through, rel.ColT, c.parent.Name, c.parent.ID, rel.Left.Col)
 	io.WriteString(c.w, ` LEFT OUTER JOIN "`)
 	io.WriteString(c.w, rel.Through)
 	io.WriteString(c.w, `" ON ((`)
 	colWithTable(c.w, rel.Through, rel.ColT)
 	io.WriteString(c.w, `) = (`)
-	if id != -1 {
-		colWithTableID(c.w, pt.Name, id, rel.Col1)
-	} else {
-		colWithTable(c.w, pt.Name, rel.Col1)
-	}
+	colWithTableID(c.w, pt.Name, id, rel.Left.Col)
 	io.WriteString(c.w, `))`)
 
 	return nil
@@ -461,9 +463,9 @@ func (c *compilerContext) renderRemoteRelColumns(sel *qcode.Select, ti *DBTableI
 			io.WriteString(c.w, ", ")
 		}
 		//fmt.Fprintf(w, `"%s_%d"."%s" AS "%s"`,
-		//c.sel.Name, c.sel.ID, rel.Col1, rel.Col2)
-		colWithTableID(c.w, ti.Name, sel.ID, rel.Col1)
-		alias(c.w, rel.Col2)
+		//c.sel.Name, c.sel.ID, rel.Left.Col, rel.Right.Col)
+		colWithTableID(c.w, ti.Name, sel.ID, rel.Left.Col)
+		alias(c.w, rel.Right.Col)
 		i++
 	}
 }
@@ -514,7 +516,7 @@ func (c *compilerContext) renderBaseSelect(sel *qcode.Select, ti *DBTableInfo,
 	for n, col := range sel.Cols {
 		cn := col.Name
 
-		_, isRealCol := ti.Columns[cn]
+		_, isRealCol := ti.ColMap[cn]
 
 		if !isRealCol {
 			if isSearch {
@@ -525,7 +527,10 @@ func (c *compilerContext) renderBaseSelect(sel *qcode.Select, ti *DBTableInfo,
 							continue
 						}
 					}
-					cn = ti.TSVCol
+					if ti.TSVCol == nil {
+						return errors.New("no ts_vector column found")
+					}
+					cn = ti.TSVCol.Name
 					arg := sel.Args["search"]
 
 					if i != 0 {
@@ -741,7 +746,13 @@ func (c *compilerContext) renderOrderByColumns(sel *qcode.Select, ti *DBTableInf
 
 func (c *compilerContext) renderRelationship(sel *qcode.Select, ti *DBTableInfo) error {
 	parent := c.s[sel.ParentID]
-	return c.renderRelationshipByName(ti.Name, parent.Name, parent.ID)
+
+	pti, err := c.schema.GetTable(parent.Name)
+	if err != nil {
+		return err
+	}
+
+	return c.renderRelationshipByName(ti.Name, pti.Name, parent.ID)
 }
 
 func (c *compilerContext) renderRelationshipByName(table, parent string, id int32) error {
@@ -750,53 +761,68 @@ func (c *compilerContext) renderRelationshipByName(table, parent string, id int3
 		return err
 	}
 
-	switch rel.Type {
-	case RelBelongTo:
-		//fmt.Fprintf(w, `(("%s"."%s") = ("%s_%d"."%s"))`,
-		//c.sel.Name, rel.Col1, c.parent.Name, c.parent.ID, rel.Col2)
-		io.WriteString(c.w, `((`)
-		colWithTable(c.w, table, rel.Col1)
-		io.WriteString(c.w, `) = (`)
-		if id != -1 {
-			colWithTableID(c.w, parent, id, rel.Col2)
-		} else {
-			colWithTable(c.w, parent, rel.Col2)
-		}
-		io.WriteString(c.w, `))`)
+	io.WriteString(c.w, `((`)
 
-	case RelOneToMany:
+	switch rel.Type {
+	case RelOneToOne, RelOneToMany:
+
 		//fmt.Fprintf(w, `(("%s"."%s") = ("%s_%d"."%s"))`,
-		//c.sel.Name, rel.Col1, c.parent.Name, c.parent.ID, rel.Col2)
-		io.WriteString(c.w, `((`)
-		colWithTable(c.w, table, rel.Col1)
-		io.WriteString(c.w, `) = (`)
-		if id != -1 {
-			colWithTableID(c.w, parent, id, rel.Col2)
-		} else {
-			colWithTable(c.w, parent, rel.Col2)
+		//c.sel.Name, rel.Left.Col, c.parent.Name, c.parent.ID, rel.Right.Col)
+
+		switch {
+		case !rel.Left.Array && rel.Right.Array:
+			colWithTable(c.w, table, rel.Left.Col)
+			io.WriteString(c.w, `) = any (`)
+			colWithTableID(c.w, parent, id, rel.Right.Col)
+
+		case rel.Left.Array && !rel.Right.Array:
+			colWithTableID(c.w, parent, id, rel.Right.Col)
+			io.WriteString(c.w, `) = any (`)
+			colWithTable(c.w, table, rel.Left.Col)
+
+		default:
+			colWithTable(c.w, table, rel.Left.Col)
+			io.WriteString(c.w, `) = (`)
+			colWithTableID(c.w, parent, id, rel.Right.Col)
 		}
-		io.WriteString(c.w, `))`)
 
 	case RelOneToManyThrough:
 		// This requires the through table to be joined onto this select
 		//fmt.Fprintf(w, `(("%s"."%s") = ("%s"."%s"))`,
-		//c.sel.Name, rel.Col1, rel.Through, rel.Col2)
-		io.WriteString(c.w, `((`)
-		colWithTable(c.w, table, rel.Col1)
-		io.WriteString(c.w, `) = (`)
-		colWithTable(c.w, rel.Through, rel.Col2)
-		io.WriteString(c.w, `))`)
+		//c.sel.Name, rel.Left.Col, rel.Through, rel.Right.Col)
+
+		switch {
+		case !rel.Left.Array && rel.Right.Array:
+			colWithTable(c.w, table, rel.Left.Col)
+			io.WriteString(c.w, `) = any (`)
+			colWithTable(c.w, rel.Through, rel.Right.Col)
+
+		case rel.Left.Array && !rel.Right.Array:
+			colWithTable(c.w, rel.Through, rel.Right.Col)
+			io.WriteString(c.w, `) = any (`)
+			colWithTable(c.w, table, rel.Left.Col)
+
+		default:
+			colWithTable(c.w, table, rel.Left.Col)
+			io.WriteString(c.w, `) = (`)
+			colWithTable(c.w, rel.Through, rel.Right.Col)
+		}
 	}
+	io.WriteString(c.w, `))`)
 
 	return nil
 }
 
 func (c *compilerContext) renderWhere(sel *qcode.Select, ti *DBTableInfo) error {
-	st := util.NewStack()
-
 	if sel.Where != nil {
-		st.Push(sel.Where)
+		return c.renderExp(sel.Where, ti, false)
 	}
+	return nil
+}
+
+func (c *compilerContext) renderExp(ex *qcode.Exp, ti *DBTableInfo, skipNested bool) error {
+	st := util.NewStack()
+	st.Push(ex)
 
 	for {
 		if st.Len() == 0 {
@@ -806,6 +832,14 @@ func (c *compilerContext) renderWhere(sel *qcode.Select, ti *DBTableInfo) error 
 		intf := st.Pop()
 
 		switch val := intf.(type) {
+		case int32:
+			switch val {
+			case '(':
+				io.WriteString(c.w, `(`)
+			case ')':
+				io.WriteString(c.w, `)`)
+			}
+
 		case qcode.ExpOp:
 			switch val {
 			case qcode.OpAnd:
@@ -827,12 +861,14 @@ func (c *compilerContext) renderWhere(sel *qcode.Select, ti *DBTableInfo) error 
 				qcode.FreeExp(val)
 
 			case qcode.OpAnd, qcode.OpOr:
+				st.Push(')')
 				for i := len(val.Children) - 1; i >= 0; i-- {
 					st.Push(val.Children[i])
 					if i > 0 {
 						st.Push(val.Op)
 					}
 				}
+				st.Push('(')
 				qcode.FreeExp(val)
 
 			case qcode.OpNot:
@@ -841,16 +877,16 @@ func (c *compilerContext) renderWhere(sel *qcode.Select, ti *DBTableInfo) error 
 				qcode.FreeExp(val)
 
 			default:
-				if len(val.NestedCols) != 0 {
+				if !skipNested && len(val.NestedCols) != 0 {
 					io.WriteString(c.w, `EXISTS `)
 
-					if err := c.renderNestedWhere(val, sel, ti); err != nil {
+					if err := c.renderNestedWhere(val, ti); err != nil {
 						return err
 					}
 
 				} else {
 					//fmt.Fprintf(w, `(("%s"."%s") `, c.sel.Name, val.Col)
-					if err := c.renderOp(val, sel, ti); err != nil {
+					if err := c.renderOp(val, ti); err != nil {
 						return err
 					}
 					qcode.FreeExp(val)
@@ -866,7 +902,7 @@ func (c *compilerContext) renderWhere(sel *qcode.Select, ti *DBTableInfo) error 
 	return nil
 }
 
-func (c *compilerContext) renderNestedWhere(ex *qcode.Exp, sel *qcode.Select, ti *DBTableInfo) error {
+func (c *compilerContext) renderNestedWhere(ex *qcode.Exp, ti *DBTableInfo) error {
 	for i := 0; i < len(ex.NestedCols)-1; i++ {
 		cti, err := c.schema.GetTable(ex.NestedCols[i])
 		if err != nil {
@@ -890,6 +926,14 @@ func (c *compilerContext) renderNestedWhere(ex *qcode.Exp, sel *qcode.Select, ti
 			return err
 		}
 
+		io.WriteString(c.w, ` AND (`)
+
+		if err := c.renderExp(ex, cti, true); err != nil {
+			return err
+		}
+
+		io.WriteString(c.w, `)`)
+
 	}
 
 	for i := 0; i < len(ex.NestedCols)-1; i++ {
@@ -899,7 +943,7 @@ func (c *compilerContext) renderNestedWhere(ex *qcode.Exp, sel *qcode.Select, ti
 	return nil
 }
 
-func (c *compilerContext) renderOp(ex *qcode.Exp, sel *qcode.Select, ti *DBTableInfo) error {
+func (c *compilerContext) renderOp(ex *qcode.Exp, ti *DBTableInfo) error {
 	var col *DBColumn
 	var ok bool
 
@@ -908,7 +952,7 @@ func (c *compilerContext) renderOp(ex *qcode.Exp, sel *qcode.Select, ti *DBTable
 	}
 
 	if len(ex.Col) != 0 {
-		if col, ok = ti.Columns[ex.Col]; !ok {
+		if col, ok = ti.ColMap[ex.Col]; !ok {
 			return fmt.Errorf("no column '%s' found ", ex.Col)
 		}
 
@@ -919,9 +963,9 @@ func (c *compilerContext) renderOp(ex *qcode.Exp, sel *qcode.Select, ti *DBTable
 
 	switch ex.Op {
 	case qcode.OpEquals:
-		io.WriteString(c.w, `=`)
+		io.WriteString(c.w, `IS NOT DISTINCT FROM`)
 	case qcode.OpNotEquals:
-		io.WriteString(c.w, `!=`)
+		io.WriteString(c.w, `IS DISTINCT FROM`)
 	case qcode.OpGreaterOrEquals:
 		io.WriteString(c.w, `>=`)
 	case qcode.OpLesserOrEquals:
@@ -965,28 +1009,23 @@ func (c *compilerContext) renderOp(ex *qcode.Exp, sel *qcode.Select, ti *DBTable
 		return nil
 
 	case qcode.OpEqID:
-		if len(ti.PrimaryCol) == 0 {
+		if ti.PrimaryCol == nil {
 			return fmt.Errorf("no primary key column defined for %s", ti.Name)
 		}
-		if col, ok = ti.Columns[ti.PrimaryCol]; !ok {
-			return fmt.Errorf("no primary key column '%s' found ", ti.PrimaryCol)
-		}
+		col = ti.PrimaryCol
 		//fmt.Fprintf(w, `(("%s") =`, c.ti.PrimaryCol)
 		io.WriteString(c.w, `((`)
-		colWithTable(c.w, ti.Name, ti.PrimaryCol)
+		colWithTable(c.w, ti.Name, ti.PrimaryCol.Name)
 		//io.WriteString(c.w, ti.PrimaryCol)
 		io.WriteString(c.w, `) =`)
 
 	case qcode.OpTsQuery:
-		if len(ti.TSVCol) == 0 {
+		if ti.PrimaryCol == nil {
 			return fmt.Errorf("no tsv column defined for %s", ti.Name)
-		}
-		if _, ok = ti.Columns[ti.TSVCol]; !ok {
-			return fmt.Errorf("no tsv column '%s' found ", ti.TSVCol)
 		}
 		//fmt.Fprintf(w, `(("%s") @@ websearch_to_tsquery('%s'))`, c.ti.TSVCol, val.Val)
 		io.WriteString(c.w, `((`)
-		colWithTable(c.w, ti.Name, ti.TSVCol)
+		colWithTable(c.w, ti.Name, ti.TSVCol.Name)
 		if c.schema.ver >= 110000 {
 			io.WriteString(c.w, `) @@ websearch_to_tsquery('`)
 		} else {
@@ -1002,6 +1041,8 @@ func (c *compilerContext) renderOp(ex *qcode.Exp, sel *qcode.Select, ti *DBTable
 
 	if ex.Type == qcode.ValList {
 		c.renderList(ex)
+	} else if col == nil {
+		return errors.New("no column found for expression value")
 	} else {
 		c.renderVal(ex, c.vars, col)
 	}
@@ -1179,8 +1220,10 @@ func colWithTable(w io.Writer, table, col string) {
 func colWithTableID(w io.Writer, table string, id int32, col string) {
 	io.WriteString(w, `"`)
 	io.WriteString(w, table)
-	io.WriteString(w, `_`)
-	int2string(w, id)
+	if id >= 0 {
+		io.WriteString(w, `_`)
+		int2string(w, id)
+	}
 	io.WriteString(w, `"."`)
 	io.WriteString(w, col)
 	io.WriteString(w, `"`)

@@ -253,7 +253,6 @@ func (com *Compiler) Compile(query []byte, role string) (*QCode, error) {
 
 func (com *Compiler) compileQuery(qc *QCode, op *Operation, role string) error {
 	id := int32(0)
-	parentID := int32(-1)
 
 	if len(op.Fields) == 0 {
 		return errors.New("invalid graphql no query found")
@@ -275,7 +274,8 @@ func (com *Compiler) compileQuery(qc *QCode, op *Operation, role string) error {
 
 	for i := range op.Fields {
 		if op.Fields[i].ParentID == -1 {
-			st.Push(op.Fields[i].ID)
+			val := op.Fields[i].ID | (-1 << 16)
+			st.Push(val)
 		}
 	}
 
@@ -288,11 +288,18 @@ func (com *Compiler) compileQuery(qc *QCode, op *Operation, role string) error {
 			return fmt.Errorf("selector limit reached (%d)", maxSelectors)
 		}
 
-		fid := st.Pop()
+		val := st.Pop()
+		fid := val & 0xFFFF
+		parentID := (val >> 16) & 0xFFFF
+
 		field := &op.Fields[fid]
 
 		if _, ok := com.bl[field.Name]; ok {
 			continue
+		}
+
+		if field.ParentID == -1 {
+			parentID = -1
 		}
 
 		trv := com.getRole(role, field.Name)
@@ -353,8 +360,8 @@ func (com *Compiler) compileQuery(qc *QCode, op *Operation, role string) error {
 			}
 
 			if len(f.Children) != 0 {
-				parentID = s.ID
-				st.Push(f.ID)
+				val := f.ID | (s.ID << 16)
+				st.Push(val)
 				continue
 			}
 
@@ -933,10 +940,13 @@ func setWhereColName(ex *Exp, node *Node) {
 			list = append([]string{k}, list...)
 		}
 	}
-	if len(list) == 1 {
+	listlen := len(list)
+
+	if listlen == 1 {
 		ex.Col = list[0]
-	} else if len(list) > 1 {
-		ex.NestedCols = list
+	} else if listlen > 1 {
+		ex.Col = list[listlen-1]
+		ex.NestedCols = list[:listlen]
 	}
 }
 
@@ -988,6 +998,11 @@ func compileFilter(filter []string) (*Exp, error) {
 		if err != nil {
 			return nil, err
 		}
+
+		// TODO: Invalid table names in nested where causes fail silently
+		// returning a nil 'f' this needs to be fixed
+
+		// TODO: Invalid where clauses such as missing op (eg. eq) also fail silently
 
 		if fl == nil {
 			fl = f
@@ -1082,7 +1097,6 @@ func (t ExpOp) String() string {
 }
 
 func FreeExp(ex *Exp) {
-	//	fmt.Println(">", ex.doFree)
 	if ex.doFree {
 		expPool.Put(ex)
 	}

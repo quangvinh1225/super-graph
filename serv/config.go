@@ -5,6 +5,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/gobuffalo/flect"
@@ -19,6 +20,7 @@ type config struct {
 	HostPort       string `mapstructure:"host_port"`
 	Host           string
 	Port           string
+	HTTPGZip       bool   `mapstructure:"http_compress"`
 	WebUI          bool   `mapstructure:"web_ui"`
 	LogLevel       string `mapstructure:"log_level"`
 	EnableTracing  bool   `mapstructure:"enable_tracing"`
@@ -57,16 +59,17 @@ type config struct {
 	}
 
 	DB struct {
-		Type       string
-		Host       string
-		Port       uint16
-		DBName     string
-		User       string
-		Password   string
-		Schema     string
-		PoolSize   int32 `mapstructure:"pool_size"`
-		MaxRetries int   `mapstructure:"max_retries"`
-		SetUserID  bool  `mapstructure:"set_user_id"`
+		Type        string
+		Host        string
+		Port        uint16
+		DBName      string
+		User        string
+		Password    string
+		Schema      string
+		PoolSize    int32         `mapstructure:"pool_size"`
+		MaxRetries  int           `mapstructure:"max_retries"`
+		SetUserID   bool          `mapstructure:"set_user_id"`
+		PingTimeout time.Duration `mapstructure:"ping_timeout"`
 
 		Vars      map[string]string `mapstructure:"variables"`
 		Blocklist []string
@@ -76,9 +79,15 @@ type config struct {
 
 	Tables []configTable
 
-	RolesQuery string `mapstructure:"roles_query"`
-	Roles      []configRole
-	roles      map[string]*configRole
+	RolesQuery  string `mapstructure:"roles_query"`
+	Roles       []configRole
+	roles       map[string]*configRole
+	abacEnabled bool
+}
+
+type configColumn struct {
+	Name       string
+	ForeignKey string `mapstructure:"related_to"`
 }
 
 type configTable struct {
@@ -86,6 +95,7 @@ type configTable struct {
 	Table     string
 	Blocklist []string
 	Remotes   []configRemote
+	Columns   []configColumn
 }
 
 type configRemote struct {
@@ -226,6 +236,7 @@ func (c *config) Init(vi *viper.Viper) error {
 		if _, ok := c.roles[role.Name]; ok {
 			errlog.Fatal().Msgf("duplicate role '%s' found", role.Name)
 		}
+
 		role.Name = strings.ToLower(role.Name)
 		role.Match = sanitize(role.Match)
 		role.tablesMap = make(map[string]*configRoleTable)
@@ -246,6 +257,21 @@ func (c *config) Init(vi *viper.Viper) error {
 	if _, ok := c.roles["anon"]; !ok {
 		logger.Warn().Msg("unauthenticated requests will be blocked. no role 'anon' defined")
 		c.AuthFailBlock = true
+	}
+
+	if len(c.RolesQuery) == 0 {
+		c.abacEnabled = false
+	} else {
+		switch len(c.Roles) {
+		case 0, 1:
+			c.abacEnabled = false
+		case 2:
+			_, ok1 := c.roles["anon"]
+			_, ok2 := c.roles["user"]
+			c.abacEnabled = !(ok1 && ok2)
+		default:
+			c.abacEnabled = true
+		}
 	}
 
 	c.validate()
@@ -294,6 +320,15 @@ func (c *config) getAliasMap() map[string][]string {
 		m[t.Table] = append(m[t.Table], t.Name)
 	}
 	return m
+}
+
+func (c *config) isABACEnabled() bool {
+	return c.abacEnabled
+}
+
+func (c *config) isAnonRoleDefined() bool {
+	_, ok := c.roles["anon"]
+	return ok
 }
 
 var varRe1 = regexp.MustCompile(`(?mi)\$([a-zA-Z0-9_.]+)`)

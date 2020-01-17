@@ -156,11 +156,23 @@ func parseSelectionSet(gql []byte) (*Operation, error) {
 		return nil, err
 	}
 
-	lexPool.Put(l)
-
-	if err != nil {
-		return nil, err
+	if p.peek(itemObjClose) {
+		p.ignore()
+	} else {
+		return nil, fmt.Errorf("operation missing closing '}'")
 	}
+
+	if !p.peek(itemEOF) {
+		p.ignore()
+		return nil, fmt.Errorf("invalid '%s' found after closing '}'", p.current())
+	}
+
+	// for i := p.pos; i < len(p.items); i++ {
+	// 	fmt.Printf("2>>>> %#v\n", p.items[i])
+	// }
+	//return nil, fmt.Errorf("unexpected token")
+
+	lexPool.Put(l)
 
 	return op, err
 }
@@ -169,7 +181,7 @@ func (p *Parser) next() item {
 	n := p.pos + 1
 	if n >= len(p.items) {
 		p.err = errEOT
-		return item{typ: itemEOF}
+		return item{_type: itemEOF}
 	}
 	p.pos = n
 	return p.items[p.pos]
@@ -184,16 +196,21 @@ func (p *Parser) ignore() {
 	p.pos = n
 }
 
+func (p *Parser) current() string {
+	item := p.items[p.pos]
+	return b2s(p.input[item.pos:item.end])
+}
+
 func (p *Parser) peek(types ...itemType) bool {
 	n := p.pos + 1
-	if p.items[n].typ == itemEOF {
-		return false
-	}
+	// if p.items[n]._type == itemEOF {
+	// 	return false
+	// }
 	if n >= len(p.items) {
 		return false
 	}
 	for i := 0; i < len(types); i++ {
-		if p.items[n].typ == types[i] {
+		if p.items[n]._type == types[i] {
 			return true
 		}
 	}
@@ -210,7 +227,7 @@ func (p *Parser) parseOp() (*Operation, error) {
 	op := opPool.Get().(*Operation)
 	op.Reset()
 
-	switch item.typ {
+	switch item._type {
 	case itemQuery:
 		op.Type = opQuery
 	case itemMutation:
@@ -292,8 +309,9 @@ func (p *Parser) parseFields(fields []Field) ([]Field, error) {
 
 			if st.Len() == 0 {
 				break
+			} else {
+				continue
 			}
-			continue
 		}
 
 		if !p.peek(itemName) {
@@ -306,6 +324,8 @@ func (p *Parser) parseFields(fields []Field) ([]Field, error) {
 		f.Args = f.argsA[:0]
 		f.Children = f.childrenA[:0]
 
+		// Parse the inside of the the fields () parentheses
+		// in short parse the args like id, where, etc
 		if err := p.parseField(f); err != nil {
 			return nil, err
 		}
@@ -318,6 +338,8 @@ func (p *Parser) parseFields(fields []Field) ([]Field, error) {
 			f.ParentID = -1
 		}
 
+		// The first opening curley brackets after this
+		// comes the columns or child fields
 		if p.peek(itemObjOpen) {
 			p.ignore()
 			st.Push(f.ID)
@@ -329,17 +351,19 @@ func (p *Parser) parseFields(fields []Field) ([]Field, error) {
 
 func (p *Parser) parseField(f *Field) error {
 	var err error
-	f.Name = p.val(p.next())
+	v := p.next()
 
 	if p.peek(itemColon) {
 		p.ignore()
 
 		if p.peek(itemName) {
-			f.Alias = f.Name
-			f.Name = p.val(p.next())
+			f.Alias = p.val(v)
+			f.Name = p.vall(p.next())
 		} else {
 			return errors.New("expecting an aliased field name")
 		}
+	} else {
+		f.Name = p.vall(v)
 	}
 
 	if p.peek(itemArgsOpen) {
@@ -471,7 +495,7 @@ func (p *Parser) parseValue() (*Node, error) {
 	node := nodePool.Get().(*Node)
 	node.Reset()
 
-	switch item.typ {
+	switch item._type {
 	case itemIntVal:
 		node.Type = NodeInt
 	case itemFloatVal:
@@ -493,6 +517,11 @@ func (p *Parser) parseValue() (*Node, error) {
 }
 
 func (p *Parser) val(v item) string {
+	return b2s(p.input[v.pos:v.end])
+}
+
+func (p *Parser) vall(v item) string {
+	lowercase(p.input, v.pos, v.end)
 	return b2s(p.input[v.pos:v.end])
 }
 

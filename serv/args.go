@@ -3,6 +3,7 @@ package serv
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,18 +34,23 @@ func argMap(ctx context.Context, vars []byte) func(w io.Writer, tag string) (int
 		}
 
 		fields := jsn.Get(vars, [][]byte{[]byte(tag)})
+
 		if len(fields) == 0 {
 			return 0, nil
 		}
+		v := fields[0].Value
+		if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+			fields[0].Value = v[1 : len(v)-1]
+		}
 
-		return w.Write(fields[0].Value)
+		return w.Write(escQuote(fields[0].Value))
 	}
 }
 
 func argList(ctx *coreContext, args [][]byte) ([]interface{}, error) {
 	vars := make([]interface{}, len(args))
 
-	var fields map[string]interface{}
+	var fields map[string]json.RawMessage
 	var err error
 
 	if len(ctx.req.Vars) != 0 {
@@ -82,13 +88,50 @@ func argList(ctx *coreContext, args [][]byte) ([]interface{}, error) {
 
 		default:
 			if v, ok := fields[string(av)]; ok {
-				vars[i] = v
+				switch v[0] {
+				case '[', '{':
+					vars[i] = escQuote(v)
+				default:
+					var val interface{}
+					if err := json.Unmarshal(v, &val); err != nil {
+						return nil, err
+					}
+					vars[i] = val
+				}
+
 			} else {
 				return nil, fmt.Errorf("query requires variable $%s", string(av))
-
 			}
 		}
 	}
 
 	return vars, nil
+}
+
+func escQuote(b []byte) []byte {
+	f := false
+	for i := range b {
+		if b[i] == '\'' {
+			f = true
+			break
+		}
+	}
+	if !f {
+		return b
+	}
+
+	buf := &bytes.Buffer{}
+	s := 0
+	for i := range b {
+		if b[i] == '\'' {
+			buf.Write(b[s:i])
+			buf.WriteString(`''`)
+			s = i + 1
+		}
+	}
+	l := len(b)
+	if s < (l - 1) {
+		buf.Write(b[s:l])
+	}
+	return buf.Bytes()
 }

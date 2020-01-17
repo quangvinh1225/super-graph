@@ -13,9 +13,10 @@ import (
 )
 
 type preparedItem struct {
-	sd   *pgconn.StatementDescription
-	args [][]byte
-	st   *stmt
+	sd      *pgconn.StatementDescription
+	args    [][]byte
+	st      stmt
+	roleArg bool
 }
 
 var (
@@ -69,6 +70,12 @@ func prepareStmt(gql string, vars []byte) error {
 	qt := qcode.GetQType(gql)
 	q := []byte(gql)
 
+	if len(vars) == 0 {
+		logger.Debug().Msgf("Prepared statement:\n%s\n", gql)
+	} else {
+		logger.Debug().Msgf("Prepared statement:\n%s\n%s\n", vars, gql)
+	}
+
 	tx, err := db.Begin(context.Background())
 	if err != nil {
 		return err
@@ -77,44 +84,54 @@ func prepareStmt(gql string, vars []byte) error {
 
 	switch qt {
 	case qcode.QTQuery:
-		stmts1, err := buildMultiStmt(q, vars)
+		var stmts1 []stmt
+		var err error
+
+		if conf.isABACEnabled() {
+			stmts1, err = buildMultiStmt(q, vars)
+		} else {
+			stmts1, err = buildRoleStmt(q, vars, "user")
+		}
+
 		if err != nil {
 			return err
 		}
 
-		err = prepare(tx, &stmts1[0], gqlHash(gql, vars, "user"))
+		logger.Debug().Msg("Prepared statement role: user")
+
+		err = prepare(tx, stmts1, gqlHash(gql, vars, "user"))
 		if err != nil {
 			return err
 		}
 
-		stmts2, err := buildRoleStmt(q, vars, "anon")
-		if err != nil {
-			return err
-		}
+		if conf.isAnonRoleDefined() {
+			logger.Debug().Msg("Prepared statement for role: anon")
 
-		err = prepare(tx, &stmts2[0], gqlHash(gql, vars, "anon"))
-		if err != nil {
-			return err
+			stmts2, err := buildRoleStmt(q, vars, "anon")
+			if err != nil {
+				return err
+			}
+
+			err = prepare(tx, stmts2, gqlHash(gql, vars, "anon"))
+			if err != nil {
+				return err
+			}
 		}
 
 	case qcode.QTMutation:
 		for _, role := range conf.Roles {
+			logger.Debug().Msgf("Prepared statement for role: %s", role.Name)
+
 			stmts, err := buildRoleStmt(q, vars, role.Name)
 			if err != nil {
 				return err
 			}
 
-			err = prepare(tx, &stmts[0], gqlHash(gql, vars, role.Name))
+			err = prepare(tx, stmts, gqlHash(gql, vars, role.Name))
 			if err != nil {
 				return err
 			}
 		}
-	}
-
-	if len(vars) == 0 {
-		logger.Debug().Msgf("Building prepared statement for:\n %s", gql)
-	} else {
-		logger.Debug().Msgf("Building prepared statement:\n %s\n%s", vars, gql)
 	}
 
 	if err := tx.Commit(context.Background()); err != nil {
@@ -124,8 +141,8 @@ func prepareStmt(gql string, vars []byte) error {
 	return nil
 }
 
-func prepare(tx pgx.Tx, st *stmt, key string) error {
-	finalSQL, am := processTemplate(st.sql)
+func prepare(tx pgx.Tx, st []stmt, key string) error {
+	finalSQL, am := processTemplate(st[0].sql)
 
 	sd, err := tx.Prepare(context.Background(), "", finalSQL)
 	if err != nil {
@@ -133,22 +150,27 @@ func prepare(tx pgx.Tx, st *stmt, key string) error {
 	}
 
 	_preparedList[key] = &preparedItem{
-		sd:   sd,
-		args: am,
-		st:   st,
+		sd:      sd,
+		args:    am,
+		st:      st[0],
+		roleArg: len(st) > 1,
 	}
 	return nil
 }
 
 // nolint: errcheck
 func prepareRoleStmt(tx pgx.Tx) error {
-	if len(conf.RolesQuery) == 0 {
+	if !conf.isABACEnabled() {
 		return nil
 	}
 
 	w := &bytes.Buffer{}
 
-	io.WriteString(w, `SELECT (CASE`)
+	io.WriteString(w, `SELECT (CASE WHEN EXISTS (`)
+	io.WriteString(w, conf.RolesQuery)
+	io.WriteString(w, `) THEN `)
+
+	io.WriteString(w, `(SELECT (CASE`)
 	for _, role := range conf.Roles {
 		if len(role.Match) == 0 {
 			continue
@@ -162,7 +184,8 @@ func prepareRoleStmt(tx pgx.Tx) error {
 
 	io.WriteString(w, ` ELSE {{role}} END) FROM (`)
 	io.WriteString(w, conf.RolesQuery)
-	io.WriteString(w, `) AS "_sg_auth_roles_query"`)
+	io.WriteString(w, `) AS "_sg_auth_roles_query" LIMIT 1) `)
+	io.WriteString(w, `ELSE 'anon' END) FROM (VALUES (1)) AS "_sg_auth_filler" LIMIT 1; `)
 
 	roleSQL, _ := processTemplate(w.String())
 

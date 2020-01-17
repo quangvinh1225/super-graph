@@ -520,7 +520,20 @@ query {
 }
 ```
 
-### Advanced queries
+### Sorting
+
+To sort or ordering results just use the `order_by` argument. This can be combined with `where`, `search`, etc to build complex queries to fit you needs.
+
+```graphql
+query {
+  products(order_by: { cached_votes_total: desc }) {
+    id
+    name
+  }
+}
+```
+
+### Filtering
 
 Super Graph support complex queries where you can add filters, ordering,offsets and limits on the query. For example the below query will list all products where the price is greater than 10 and the id is not 5.
 
@@ -640,7 +653,7 @@ query {
 
 ## Mutations
 
-In GraphQL mutations is the operation type for when you need to modify data. Super Graph supports the `insert`, `update`, `upsert` and `delete` database operations. Here are some examples.
+In GraphQL mutations is the operation type for when you need to modify data. Super Graph supports the `insert`, `update`, `upsert` and `delete`. You can also do complex nested inserts and updates.
 
 When using mutations the data must be passed as variables since Super Graphs compiles the query into an prepared statement in the database for maximum speed. Prepared statements are are functions in your code when called they accept arguments and your variables are passed in as those arguments.
 
@@ -823,7 +836,137 @@ mutation {
 }
 ```
 
-### Using variables
+## Nested Mutations
+
+Often you will need to create or update multiple related items at the same time. This can be done using nested mutations. For example you might need to create a product and assign it to a user, or create a user and his products at the same time. You just have to use simple json to define you mutation and Super Graph takes care of the rest.
+
+### Nested Insert 
+
+Create a product item first and then assign it to a user
+
+```json
+{
+  "data": {
+    "name": "Apple",
+    "price": 1.25,
+    "created_at": "now",
+    "updated_at": "now",
+    "user": {
+      "connect": { "id": 5 }
+    }
+  }
+}
+```
+
+```graphql
+mutation {
+  product(insert: $data) {
+    id
+    name
+    user {
+      id
+      full_name
+      email
+    }
+  }
+}
+```
+
+Or it's reverse, create the user first and then his product
+
+```json
+{
+  "data": {
+    "email": "thedude@rug.com",
+    "full_name": "The Dude",
+    "created_at": "now",
+    "updated_at": "now",
+    "product": {
+      "name": "Apple",
+      "price": 1.25,
+      "created_at": "now",
+      "updated_at": "now"
+    }
+  }
+}
+```
+
+```graphql
+mutation {
+  user(insert: $data) {
+    id
+    full_name
+    email
+    product {
+      id
+      name
+      price
+    }
+  }
+}
+```
+
+### Nested Updates 
+
+Update a product item first and then assign it to a user
+
+```json
+{
+  "data": {
+    "name": "Apple",
+    "price": 1.25,
+    "user": {
+      "connect": { "id": 5 }
+    }
+  }
+}
+```
+
+```graphql
+mutation {
+  product(update: $data, id: 5) {
+    id
+    name
+    user {
+      id
+      full_name
+      email
+    }
+  }
+}
+```
+
+Or it's reverse, update a user first and then his product
+
+```json
+{
+  "data": {
+    "email": "newemail@me.com",
+    "full_name": "The Dude",
+    "product": {
+      "name": "Banana",
+      "price": 1.25,
+    }
+  }
+}
+```
+
+```graphql
+mutation {
+  user(update: $data, id: 1) {
+    id
+    full_name
+    email
+    product {
+      id
+      name
+      price
+    }
+  }
+}
+```
+
+## Using variables
 
 Variables (`$product_id`) and their values (`"product_id": 5`) can be passed along side the GraphQL query. Using variables makes for better client side code as well as improved server side SQL query caching. The build-in web-ui also supports setting variables. Not having to manipulate your GraphQL query string to insert values into it makes for cleaner
 and better client side code.
@@ -845,7 +988,7 @@ fetch('http://localhost:8080/api/v1/graphql', {
 .then(res => console.log(res.data));
 ```
 
-### Full text search
+## Full text search
 
 Every app these days needs search. Enought his often means reaching for something heavy like Solr. While this will work why add complexity to your infrastructure when Postgres has really great
 and fast full text search built-in. And since it's part of Postgres it's also available in Super Graph.
@@ -1173,6 +1316,23 @@ Even tracing data is availble in the Super Graph web UI if tracing is enabled in
 
 ![Query Tracing](/tracing.png "Super Graph Web UI Query Tracing")
 
+## Database Relationships
+
+In most cases you don't need this configuration, Super Graph will discover and learn
+the relationship graph within your database automatically. It does this using `Foreign Key` relationships that you have defined in your database schema.
+
+The below configs are only needed in special cases such as when you don't use foreign keys or when you want to create a relationship between two tables where a foreign key is not defined or cannot be defined.
+
+For example in the sample below a relationship is defined between the `tags` column on the `posts` table with the `slug` column on the `tags` table. This cannot be defined as using foreign keys since the `tags` column is of type array `text[]` and Postgres for one does not allow foreign keys with array columns.
+
+```yaml
+tables:
+  - name: posts
+    columns:
+      - name: tags
+        related_to: tags.slug
+```
+
 
 ## Configuration files
 
@@ -1191,6 +1351,9 @@ web_ui: true
 
 # debug, info, warn, error, fatal, panic
 log_level: "debug"
+
+# enable or disable http compression (uses gzip)
+http_compress: true
 
 # When production mode is 'true' only queries 
 # from the allow list are permitted.
