@@ -6,6 +6,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 )
 
+// Filter function filters the JSON keeping only the provided keys and removing all others
 func Filter(w *bytes.Buffer, b []byte, keys []string) error {
 	var err error
 	kmap := make(map[uint64]struct{}, len(keys))
@@ -27,14 +28,27 @@ func Filter(w *bytes.Buffer, b []byte, keys []string) error {
 
 	var k []byte
 	state := expectKey
+	instr := false
+	slash := 0
 
 	for i := 0; i < len(b); i++ {
+		if instr && b[i] == '\\' {
+			slash++
+			continue
+		}
+
+		if b[i] == '"' && (slash%2 == 0) {
+			instr = !instr
+		}
+
 		if state == expectObjClose || state == expectListClose {
-			switch b[i] {
-			case '{', '[':
-				d++
-			case '}', ']':
-				d--
+			if !instr {
+				switch b[i] {
+				case '{', '[':
+					d++
+				case '}', ']':
+					d--
+				}
 			}
 		}
 
@@ -64,7 +78,7 @@ func Filter(w *bytes.Buffer, b []byte, keys []string) error {
 			state = expectKeyClose
 			s = i
 
-		case state == expectKeyClose && (b[i-1] != '\\' && b[i] == '"'):
+		case state == expectKeyClose && (b[i] == '"' && (slash%2 == 0)):
 			state = expectColon
 			k = b[(s + 1):i]
 
@@ -74,7 +88,7 @@ func Filter(w *bytes.Buffer, b []byte, keys []string) error {
 		case state == expectValue && b[i] == '"':
 			state = expectString
 
-		case state == expectString && (b[i-1] != '\\' && b[i] == '"'):
+		case state == expectString && (b[i] == '"' && (slash%2 == 0)):
 			e = i
 
 		case state == expectValue && b[i] == '[':
@@ -109,7 +123,7 @@ func Filter(w *bytes.Buffer, b []byte, keys []string) error {
 		case state == expectValue && b[i] == 'n':
 			state = expectNull
 
-		case state == expectNull && b[i] == 'l':
+		case state == expectNull && (b[i-1] == 'l' && b[i] == 'l'):
 			e = i
 		}
 

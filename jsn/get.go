@@ -17,11 +17,13 @@ const (
 	expectNumClose
 )
 
+// Field struct holds a JSON key and value
 type Field struct {
 	Key   []byte
 	Value []byte
 }
 
+// Value function is a utility function to sanitize returned values
 func Value(b []byte) []byte {
 	e := (len(b) - 1)
 	switch {
@@ -36,6 +38,7 @@ func Value(b []byte) []byte {
 	}
 }
 
+// Keys function fetches values for the provided keys
 func Get(b []byte, keys [][]byte) []Field {
 	kmap := make(map[uint64]struct{}, len(keys))
 
@@ -51,13 +54,27 @@ func Get(b []byte, keys [][]byte) []Field {
 	state := expectKey
 
 	n := 0
+	instr := false
+	slash := 0
+
 	for i := 0; i < len(b); i++ {
+		if instr && b[i] == '\\' {
+			slash++
+			continue
+		}
+
+		if b[i] == '"' && (slash%2 == 0) {
+			instr = !instr
+		}
+
 		if state == expectObjClose || state == expectListClose {
-			switch b[i] {
-			case '{', '[':
-				d++
-			case '}', ']':
-				d--
+			if !instr {
+				switch b[i] {
+				case '{', '[':
+					d++
+				case '}', ']':
+					d--
+				}
 			}
 		}
 
@@ -66,7 +83,7 @@ func Get(b []byte, keys [][]byte) []Field {
 			state = expectKeyClose
 			s = i
 
-		case state == expectKeyClose && (b[i-1] != '\\' && b[i] == '"'):
+		case state == expectKeyClose && (b[i] == '"' && (slash%2 == 0)):
 			state = expectColon
 			k = b[(s + 1):i]
 
@@ -77,7 +94,7 @@ func Get(b []byte, keys [][]byte) []Field {
 			state = expectString
 			s = i
 
-		case state == expectString && (b[i-1] != '\\' && b[i] == '"'):
+		case state == expectString && (b[i] == '"' && (slash%2 == 0)):
 			e = i
 
 		case state == expectValue && b[i] == '[':
@@ -117,8 +134,9 @@ func Get(b []byte, keys [][]byte) []Field {
 
 		case state == expectValue && b[i] == 'n':
 			state = expectNull
+			s = i
 
-		case state == expectNull && b[i] == 'l':
+		case state == expectNull && (b[i-1] == 'l' && b[i] == 'l'):
 			e = i
 		}
 
@@ -130,9 +148,25 @@ func Get(b []byte, keys [][]byte) []Field {
 				n++
 			}
 
+			if state == expectListClose {
+			loop:
+				for j := i + 1; j < len(b); j++ {
+					switch b[j] {
+					case ' ', '\t', '\n':
+						continue
+					case '{':
+						break loop
+					}
+					i = e
+					break loop
+				}
+			}
+
 			state = expectKey
 			e = 0
 		}
+
+		slash = 0
 	}
 
 	return res[:n]

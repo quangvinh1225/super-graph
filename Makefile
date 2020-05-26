@@ -12,30 +12,30 @@ endif
 export GO111MODULE := on
 
 # Build-time Go variables
-version        = github.com/dosco/super-graph/serv.version
-gitBranch      = github.com/dosco/super-graph/serv.gitBranch
-lastCommitSHA  = github.com/dosco/super-graph/serv.lastCommitSHA
-lastCommitTime = github.com/dosco/super-graph/serv.lastCommitTime
+version        = github.com/dosco/super-graph/internal/serv.version
+gitBranch      = github.com/dosco/super-graph/internal/serv.gitBranch
+lastCommitSHA  = github.com/dosco/super-graph/internal/serv.lastCommitSHA
+lastCommitTime = github.com/dosco/super-graph/internal/serv.lastCommitTime
 
 BUILD_FLAGS ?= -ldflags '-s -w -X ${lastCommitSHA}=${BUILD} -X "${lastCommitTime}=${BUILD_DATE}" -X "${version}=${BUILD_VERSION}" -X ${gitBranch}=${BUILD_BRANCH}'
 
 .PHONY: all build gen clean test run lint changlog release version help $(PLATFORMS)
 
 test:
-	@go test -v ./...
+	@go test -v -short -race ./...
 
 BIN_DIR := $(GOPATH)/bin
 GORICE := $(BIN_DIR)/rice
 GOLANGCILINT := $(BIN_DIR)/golangci-lint
 GITCHGLOG := $(BIN_DIR)/git-chglog
-WEB_BUILD_DIR := ./web/build/manifest.json
+WEB_BUILD_DIR := ./internal/serv/web/build/manifest.json
 
 $(GORICE):
 	@GO111MODULE=off go get -u github.com/GeertJohan/go.rice/rice
 
 $(WEB_BUILD_DIR):
-	@echo "First install Yarn and create a build of the web UI found under ./web"
-	@echo "Command: cd web && yarn build"
+	@echo "First install Yarn and create a build of the web UI then re-run make install"
+	@echo "Run this command: yarn --cwd internal/serv/web/ build"
 	@exit 1
 
 $(GITCHGLOG):
@@ -45,7 +45,7 @@ changelog: $(GITCHGLOG)
 	@git-chglog $(ARGS)
 
 $(GOLANGCILINT):
-	@GO111MODULE=off curl -sfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh| sh -s -- -b $(GOPATH)/bin v1.21.0
+	@GO111MODULE=off curl -sfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh| sh -s -- -b $(GOPATH)/bin v1.25.1
 
 lint: $(GOLANGCILINT)
 	@golangci-lint run ./... --skip-dirs-use-default
@@ -57,7 +57,7 @@ os = $(word 1, $@)
 
 $(PLATFORMS): lint test 
 	@mkdir -p release
-	@GOOS=$(os) GOARCH=amd64 go build $(BUILD_FLAGS) -o release/$(BINARY)-$(BUILD_VERSION)-$(os)-amd64
+	@GOOS=$(os) GOARCH=amd64 go build $(BUILD_FLAGS) -o release/$(BINARY)-$(BUILD_VERSION)-$(os)-amd64 main.go
 
 release: windows linux darwin
 
@@ -69,7 +69,7 @@ gen: $(GORICE) $(WEB_BUILD_DIR)
 	@go generate ./...
 
 $(BINARY): clean
-	@go build $(BUILD_FLAGS) -o $(BINARY)
+	@go build $(BUILD_FLAGS) -o $(BINARY) main.go 
 
 clean:
 	@rm -f $(BINARY)
@@ -77,11 +77,10 @@ clean:
 run: clean
 	@go run $(BUILD_FLAGS) main.go $(ARGS)
 
-install:
-	@echo $(GOPATH)
+install: clean build
 	@echo "Commit Hash: `git rev-parse HEAD`"
 	@echo "Old Hash: `shasum $(GOPATH)/bin/$(BINARY) 2>/dev/null | cut -c -32`"
-	@go install $(BUILD_FLAGS)
+	@mv $(BINARY) $(GOPATH)/bin/$(BINARY)
 	@echo "New Hash:" `shasum $(GOPATH)/bin/$(BINARY) 2>/dev/null | cut -c -32`
 
 uninstall: clean

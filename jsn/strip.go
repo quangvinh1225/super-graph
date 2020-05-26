@@ -4,6 +4,7 @@ import (
 	"bytes"
 )
 
+// Strip function strips out all values from the JSON data expect for the provided path
 func Strip(b []byte, path [][]byte) []byte {
 	s, e, d := 0, 0, 0
 
@@ -11,14 +12,27 @@ func Strip(b []byte, path [][]byte) []byte {
 	pi := 0
 	pm := false
 	state := expectKey
+	instr := false
+	slash := 0
 
 	for i := 0; i < len(b); i++ {
+		if instr && b[i] == '\\' {
+			slash++
+			continue
+		}
+
+		if b[i] == '"' && (slash%2 == 0) {
+			instr = !instr
+		}
+
 		if state == expectObjClose || state == expectListClose {
-			switch b[i] {
-			case '{', '[':
-				d++
-			case '}', ']':
-				d--
+			if !instr {
+				switch b[i] {
+				case '{', '[':
+					d++
+				case '}', ']':
+					d--
+				}
 			}
 		}
 
@@ -27,7 +41,7 @@ func Strip(b []byte, path [][]byte) []byte {
 			state = expectKeyClose
 			s = i
 
-		case state == expectKeyClose && (b[i-1] != '\\' && b[i] == '"'):
+		case state == expectKeyClose && (b[i] == '"' && (slash%2 == 0)):
 			state = expectColon
 			if pi == len(path) {
 				pi = 0
@@ -44,7 +58,7 @@ func Strip(b []byte, path [][]byte) []byte {
 			state = expectString
 			s = i
 
-		case state == expectString && (b[i-1] != '\\' && b[i] == '"'):
+		case state == expectString && (b[i] == '"' && (slash%2 == 0)):
 			e = i
 
 		case state == expectValue && b[i] == '[':
@@ -82,8 +96,9 @@ func Strip(b []byte, path [][]byte) []byte {
 
 		case state == expectValue && b[i] == 'n':
 			state = expectNull
+			s = i
 
-		case state == expectNull && b[i] == 'l':
+		case state == expectNull && (b[i-1] == 'l' && b[i] == 'l'):
 			e = i
 		}
 
@@ -100,6 +115,8 @@ func Strip(b []byte, path [][]byte) []byte {
 			state = expectKey
 			e = 0
 		}
+
+		slash = 0
 	}
 
 	return ob

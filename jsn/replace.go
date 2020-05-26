@@ -7,9 +7,15 @@ import (
 	"github.com/cespare/xxhash/v2"
 )
 
+// Replace function replaces key-value pairs provided in the `from` argument with those in the `to` argument
 func Replace(w *bytes.Buffer, b []byte, from, to []Field) error {
 	if len(from) != len(to) {
 		return errors.New("'from' and 'to' must be of the same length")
+	}
+
+	if len(from) == 0 || len(to) == 0 {
+		_, err := w.Write(b)
+		return err
 	}
 
 	h := xxhash.New()
@@ -32,18 +38,32 @@ func Replace(w *bytes.Buffer, b []byte, from, to []Field) error {
 	state := expectKey
 	ws, we := -1, len(b)
 
+	instr := false
+	slash := 0
+
 	for i := 0; i < len(b); i++ {
+		if instr && b[i] == '\\' {
+			slash++
+			continue
+		}
+
 		// skip any left padding whitespace
 		if ws == -1 && (b[i] == '{' || b[i] == '[') {
 			ws = i
 		}
 
+		if b[i] == '"' && (slash%2 == 0) {
+			instr = !instr
+		}
+
 		if state == expectObjClose || state == expectListClose {
-			switch b[i] {
-			case '{', '[':
-				d++
-			case '}', ']':
-				d--
+			if !instr {
+				switch b[i] {
+				case '{', '[':
+					d++
+				case '}', ']':
+					d--
+				}
 			}
 		}
 
@@ -52,7 +72,7 @@ func Replace(w *bytes.Buffer, b []byte, from, to []Field) error {
 			state = expectKeyClose
 			s = i
 
-		case state == expectKeyClose && (b[i-1] != '\\' && b[i] == '"'):
+		case state == expectKeyClose && (b[i] == '"' && (slash%2 == 0)):
 			state = expectColon
 			if _, err := h.Write(b[(s + 1):i]); err != nil {
 				return err
@@ -66,7 +86,7 @@ func Replace(w *bytes.Buffer, b []byte, from, to []Field) error {
 			state = expectString
 			s = i
 
-		case state == expectString && (b[i-1] != '\\' && b[i] == '"'):
+		case state == expectString && (b[i] == '"' && (slash%2 == 0)):
 			e = i
 
 		case state == expectValue && b[i] == '[':
@@ -104,8 +124,9 @@ func Replace(w *bytes.Buffer, b []byte, from, to []Field) error {
 
 		case state == expectValue && b[i] == 'n':
 			state = expectNull
+			s = i
 
-		case state == expectNull && b[i] == 'l':
+		case state == expectNull && (b[i-1] == 'l' && b[i] == 'l'):
 			e = i
 		}
 
@@ -159,6 +180,8 @@ func Replace(w *bytes.Buffer, b []byte, from, to []Field) error {
 			e = 0
 			d = 0
 		}
+
+		slash = 0
 	}
 
 	if ws == -1 || (ws == 0 && we == len(b)) {

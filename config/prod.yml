@@ -6,13 +6,13 @@ app_name: "Super Graph Production"
 host_port: 0.0.0.0:8080
 web_ui: false
 
-# debug, info, warn, error, fatal, panic, disable
+# debug, error, warn, info, none
 log_level: "info"
 
 # enable or disable http compression (uses gzip)
 http_compress: true
 
-# When production mode is 'true' only queries 
+# When production mode is 'true' only queries
 # from the allow list are permitted.
 # When it's 'false' all queries are saved to the
 # the allow list in ./config/allow.list
@@ -30,7 +30,11 @@ enable_tracing: true
 # seed_file: seed.js
 
 # Path pointing to where the migrations can be found
-# migrations_path: migrations
+# migrations_path: ./migrations
+
+# Secret key for general encryption operations like
+# encrypting the cursor data
+# secret_key: supercalifajalistics
 
 # Postgres related environment Variables
 # SG_DATABASE_HOST
@@ -50,10 +54,10 @@ database:
   port: 5432
   dbname: app_production
   user: postgres
-  password: ''
+  password: postgres
   #pool_size: 10
   #max_retries: 0
-  #log_level: "debug" 
+  #log_level: "debug"
 
   # Set session variable "user.id" to the user id
   # Enable this if you need the user id in triggers, etc
@@ -61,3 +65,12 @@ database:
 
   # database ping timeout is used for db health checking
   ping_timeout: 5m
+# open opencensus tracing and metrics
+# telemetry:
+#   debug: false
+#   metrics:
+#     exporter: "prometheus"
+#   tracing:
+#     exporter: "zipkin"
+#     endpoint: "http://zipkin:9411/api/v2/spans"
+#     sample: 0.6

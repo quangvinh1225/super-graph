@@ -1,5 +1,7 @@
+// Package jsn provides fast and no-allocation functions to extract values and modify JSON data
 package jsn
 
+// Keys function fetches all the unique keys in the JSON data in order of their occurance
 func Keys(b []byte) [][]byte {
 	res := make([][]byte, 0, 20)
 
@@ -8,17 +10,29 @@ func Keys(b []byte) [][]byte {
 	var k []byte
 	state := expectValue
 
-	st := NewStack()
+	st := newSkipInfoStack()
 	ae := 0
+	instr := false
+	slash := 0
 
 	for i := 0; i < len(b); i++ {
+		if instr && b[i] == '\\' {
+			slash++
+			continue
+		}
+
+		if b[i] == '"' && (slash%2 == 0) {
+			instr = !instr
+		}
 
 		if state == expectObjClose || state == expectListClose {
-			switch b[i] {
-			case '{', '[':
-				d++
-			case '}', ']':
-				d--
+			if !instr {
+				switch b[i] {
+				case '{', '[':
+					d++
+				case '}', ']':
+					d--
+				}
 			}
 		}
 
@@ -47,7 +61,7 @@ func Keys(b []byte) [][]byte {
 			state = expectKeyClose
 			s = i
 
-		case state == expectKeyClose && (b[i-1] != '\\' && b[i] == '"'):
+		case state == expectKeyClose && (b[i] == '"' && (slash%2 == 0)):
 			state = expectColon
 			k = b[(s + 1):i]
 
@@ -58,7 +72,7 @@ func Keys(b []byte) [][]byte {
 			state = expectString
 			s = i
 
-		case state == expectString && (b[i-1] != '\\' && b[i] == '"'):
+		case state == expectString && (b[i] == '"' && (slash%2 == 0)):
 			e = i
 
 		case state == expectValue && b[i] == '{':
@@ -101,8 +115,9 @@ func Keys(b []byte) [][]byte {
 
 		case state == expectValue && b[i] == 'n':
 			state = expectNull
+			s = i
 
-		case state == expectNull && b[i] == 'l':
+		case state == expectNull && (b[i-1] == 'l' && b[i] == 'l'):
 			e = i
 		}
 
@@ -111,11 +126,25 @@ func Keys(b []byte) [][]byte {
 				res = append(res, k)
 			}
 
+			if state == expectListClose {
+			loop:
+				for j := i + 1; j < len(b); j++ {
+					switch b[j] {
+					case ' ', '\t', '\n':
+						continue
+					case '{':
+						break loop
+					}
+					i = e
+					break loop
+				}
+			}
 			state = expectKey
 			k = nil
 			e = 0
 		}
 
+		slash = 0
 	}
 
 	return res

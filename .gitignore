@@ -23,15 +23,20 @@
 /tmp/runner-build
 /demo/tmp
 
+.idea
+*.iml
 .vscode
-main
 .DS_Store
 .swp
 .release
 main
 super-graph
-supergraph
 *-fuzz.zip
 crashers
 suppressions
 release
+.gofuzz
+*-fuzz.zip
+*.test
+.firebase
+
